@@ -1,0 +1,50 @@
+﻿<UserControl x:Class="WallpaperManager.SettingsPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" 
+    Background="DimGray" KeyDown="UserControl_KeyDown">
+    <StackPanel Margin="10">
+        <TextBlock Name="c_productversion" FontWeight="Bold" Foreground="White" FontSize="16" Text="Wallpaper Manager" Margin="0,0,0,10"/>
+        <Grid Margin="0,5,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="110"/>
+                <ColumnDefinition/>
+            </Grid.ColumnDefinitions>
+            <Label Grid.Column="0" Foreground="White" HorizontalAlignment="Left">Display Mode</Label>
+            <ComboBox Grid.Column="1" Name="c_displayMode" SelectionChanged="Settings_Changed"/>
+        </Grid>
+        <Grid Margin="0,5,0,5">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="110"/>
+                <ColumnDefinition/>
+            </Grid.ColumnDefinitions>
+            <Label Grid.Column="0" Foreground="White" HorizontalAlignment="Left">Background Color</Label>
+            <ComboBox Grid.Column="1" Name="c_backgroundcolor" SelectionChanged="Settings_Changed">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal" Margin="2">
+                            <Rectangle Fill="{Binding Path=ColorBrush}" Stroke="Black" SnapsToDevicePixels="True" Width="14" Height="14"/>
+                            <TextBlock Text="{Binding Path=Name}" Margin="4 0 4 0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+        </Grid>
+        <CheckBox Margin="15,5,0,0" Name="c_startwithwindows" Click="Settings_Changed" Foreground="White">Start when you log on to Windows</CheckBox>
+        <CheckBox Margin="15,5,0,0" Name="c_startminimized" Click="Settings_Changed" Foreground="White">Start application minimized</CheckBox>
+        <CheckBox Margin="15,5,0,0" Name="c_highresolutionthumbs" Click="Settings_Changed" Foreground="White">Use high resolution thumbnails</CheckBox>
+        <CheckBox Margin="15,5,0,0" Name="c_changeatstartup" Click="Settings_Changed" Foreground="White">Change wallpaper on application startup</CheckBox>
+        <CheckBox Margin="15,5,0,0" Name="c_changerandomly" Click="Settings_Changed" Foreground="White">Select random wallpaper</CheckBox>
+        <CheckBox Margin="15,5,0,0" Name="c_changeautomatically" Click="Settings_Changed" Foreground="White">Change wallpapers automatically</CheckBox>
+        <Grid Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Label Grid.Column="0" Foreground="White">Change wallpaper every</Label>
+            <TextBox Grid.Column="1" Name="c_timeinterval" TextChanged="Settings_Changed"/>
+            <Label Grid.Column="2" Foreground="White">minutes</Label>
+        </Grid>
+        <Button Margin="0,15,0,0" Content="OK" Width="50" Click="Close_Click"/>
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,1214 @@
+﻿using System;
+using System.IO;
+using System.Linq;
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Forms;
+using System.Windows.Controls;
+using System.Windows.Media.Imaging;
+using System.Collections.Generic;
+using System.Windows.Data;
+using System.Collections.ObjectModel;
+using System.Net.Http;
+using System.Threading.Tasks;
+using System.ComponentModel;
+
+namespace WallpaperManager
+{
+    /// <summary>
+    /// Interaction logic for Window1.xaml
+    /// </summary>
+    public partial class MainWindow : Window
+    {
+        public static string Version = ProductVersion.VersionInfo.Version;
+
+        private WallpaperList activeList;
+        private Stack<WallpaperEntry> imageStack;
+        private Timer autoChangeTimer;
+        private TrayIcon trayIcon;
+        private bool shouldExit;
+        private bool inUpdatingMode;
+
+        public event EventHandler PresentationModeChanged;
+
+        /// <summary>
+        /// Constructor for the main window
+        /// </summary>
+        public MainWindow()
+        {
+            // check for an update
+            GenericUpdater.Updater.DoUpdate("WallpaperManager", MainWindow.Version, "WallpaperManager_Version.xml", "WallpaperManager.msi", new GenericUpdater.Updater.UpdateFiredDelegate(UpdateFired));
+
+            // load the settings
+            Settings settings = Settings.Instance;
+
+            InitializeComponent();
+
+            // hide the settings panel
+            c_settings.ShowPanel(false);
+
+            // setup the tray icon
+            this.trayIcon = new TrayIcon(this);
+
+            this.imageStack = new Stack<WallpaperEntry>();
+            c_imagenext.IsEnabled = false;
+            c_imageprevious.IsEnabled = false;
+            c_imageset.IsEnabled = false;
+
+            // setup the file list
+            this.UpdateFileList();
+
+            // select the appropriate image
+            if (Settings.Instance.InPresentationMode)
+            {
+                WallpaperEntry entry = this.activeList.GetEntry(Settings.Instance.SelectedImage);
+                if (entry != null)
+                {
+                    c_filelist.SelectedItem = entry;
+                }
+
+                this.trayIcon.SetToolText(Settings.Instance.PresentationImage);
+            }
+            else
+            {
+                if (Settings.Instance.ChangeAtStartup)
+                {
+                    this.GotoNextImage(true);
+                }
+                else
+                {
+                    WallpaperEntry entry = this.activeList.GetEntry(Settings.Instance.SelectedImage);
+                    if (entry != null)
+                    {
+                        c_filelist.SelectedItem = entry;
+                    }
+
+                    this.trayIcon.SetToolText(Settings.Instance.SelectedImage);
+                }
+            }
+
+            // start the auto change time if required
+            this.autoChangeTimer = new Timer();
+            SetupAutoChangeTimer();
+
+            // show the tray icon
+            this.trayIcon.UpdateTrayIcon(true);
+
+            // hide the main window if required
+            this.trayIcon.UpdateMainWindow(!Settings.Instance.StartMinimized);
+
+            // setup the presentation mode
+            this.UpdatePresentationMode(Settings.Instance.InPresentationMode);
+        }
+
+        /// <summary>
+        /// Create and load the file list based on the settings
+        /// </summary>
+        public void UpdateFileList()
+        {
+            if (Settings.Instance.UseLocalFiles)
+            {
+                if (this.activeList == null ||
+                    this.activeList.Path != Settings.FileList_Local)
+                {
+                    WallpaperList list = null;
+                    try
+                    {
+                        list = new WallpaperList(Settings.FileList_Local, true);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLog.Log("There was an error loading the local file list, loading an empty list.", e);
+
+                        if (File.Exists(Settings.FileList_Local))
+                        {
+                            File.Delete(Settings.FileList_Local);
+                        }
+
+                        list = new WallpaperList(Settings.FileList_Local, true);
+                    }
+
+                    this.activeList = list;
+                }
+
+                c_addDirectory.IsEnabled = true;
+                c_addFile.IsEnabled = true;
+                c_removeFile.IsEnabled = true;
+                c_removeAll.IsEnabled = true;
+                c_refresh.IsEnabled = false;
+
+                c_copyPath.IsEnabled = true;
+                c_openFolder.IsEnabled = true;
+                c_deleteFile.IsEnabled = true;
+            }
+            else
+            {
+                if (this.activeList == null ||
+                    this.activeList.Path != Settings.FileList_Online)
+                {
+                    try
+                    {
+                        OnlineRepository online = new OnlineRepository();
+                        if (online.SyncToLocal())
+                        {
+                            if (File.Exists(Settings.FileList_Online))
+                            {
+                                File.Delete(Settings.FileList_Online);
+                            }
+                        }
+
+                        this.BuildOnlineFile();
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLog.Log("Unable to sync with online repository, the cached list will be used.", ex);
+                    }
+
+                    WallpaperList list = null;
+                    try
+                    {
+                        list = new WallpaperList(Settings.FileList_Online, false);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLog.Log("There was an error loading the online file list, loading an empty list.", e);
+
+                        if (File.Exists(Settings.FileList_Online))
+                        {
+                            File.Delete(Settings.FileList_Online);
+                        }
+
+                        list = new WallpaperList(Settings.FileList_Online, false);
+                    }
+
+                    this.activeList = list;
+                }
+
+                c_addDirectory.IsEnabled = false;
+                c_addFile.IsEnabled = false;
+                c_removeFile.IsEnabled = false;
+                c_removeAll.IsEnabled = false;
+                c_refresh.IsEnabled = true;
+
+                c_copyPath.IsEnabled = false;
+                c_openFolder.IsEnabled = false;
+                c_deleteFile.IsEnabled = false;
+            }
+
+            c_filelist.ItemsSource = this.activeList.List;
+            if (this.activeList.Count > 0)
+            {
+                c_imagenext.IsEnabled = true;
+            }
+            else
+            {
+                c_imagenext.IsEnabled = false;
+            }
+        }
+
+        public void GotoNextImage(bool setImage)
+        {
+            if (this.inUpdatingMode)
+            {
+                return;
+            }
+
+            this.inUpdatingMode = true;
+            this.Cursor = System.Windows.Input.Cursors.Wait;
+
+            // if the image also needs to be set then show balloon tooltip as it can be a length process
+            if (setImage)
+            {
+                this.trayIcon.SetLoadingText();
+            }
+
+            bool listUpdated = false;
+            int currentIndex = c_filelist.SelectedIndex;
+            c_filelist.SelectedIndex = -1;
+            int newIndex = -1;
+
+            while (true)
+            {
+                // get the index of the next image
+                if (this.activeList.Count == 0)
+                {
+                    newIndex = -1;
+                    break;
+                }
+                else if (Settings.Instance.ChangeRandomly)
+                {
+                    Random rand = new Random();
+                    while (true)
+                    {
+                        int index = rand.Next(this.activeList.Count);
+                        if (index != currentIndex)
+                        {
+                            newIndex = index;
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    if (currentIndex == -1)
+                    {
+                        newIndex = 0;
+                    }
+                    else if (currentIndex >= (this.activeList.Count - 1))
+                    {
+                        newIndex = 0;
+                    }
+                    else
+                    {
+                        newIndex = currentIndex + 1;
+                    }
+                }
+
+                // reset the current index so that in case we go through the loop again, we start with the new index
+                currentIndex = newIndex;
+
+                // get the entry corresponding to the index
+                WallpaperEntry newEntry = this.activeList.List[newIndex];
+
+                // try to load the thumbnail
+                try
+                {
+                    string filePath = this.GetLocalCopyOfImage(newEntry.ThumbnailPath, true);
+                    BitmapDecoder uriBitmap = BitmapDecoder.Create(new Uri(filePath), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                }
+                catch (Exception)
+                {
+                    // in case of an exception remove the entry from the list
+                    this.activeList.RemoveFile(newEntry.FilePath, true);
+                    listUpdated = true;
+
+                    // try a different image
+                    continue;
+                }
+
+                if (setImage)
+                {
+                    try
+                    {
+                        this.SetBackgroundImage(newEntry);
+                    }
+                    catch (Exception)
+                    {
+                        // in case of an exception remove the entry from the list
+                        this.activeList.RemoveFile(newEntry.FilePath, true);
+                        listUpdated = true;
+
+                        // try a different image
+                        continue;
+                    }
+                }
+
+                // if the current selection succeeded to load, end the loop
+                break;
+            }
+
+            if (listUpdated)
+            {
+                try
+                {
+                    this.activeList.SaveToFile();
+                }
+                catch (Exception)
+                {
+                    // nothing to do here
+                }
+            }
+
+            this.Cursor = System.Windows.Input.Cursors.Arrow;
+            this.inUpdatingMode = false;
+
+            c_filelist.SelectedIndex = newIndex;
+        }
+
+        public void GotoPreviousImage(bool setImage)
+        {
+            if (this.inUpdatingMode)
+            {
+                return;
+            }
+
+            this.inUpdatingMode = true;
+            this.Cursor = System.Windows.Input.Cursors.Wait;
+
+            // if the image also needs to be set then show balloon tooltip as it can be a length process
+            if (setImage)
+            {
+                this.trayIcon.SetLoadingText();
+            }
+
+            bool listUpdated = false;
+            WallpaperEntry newEntry = null;
+            c_filelist.SelectedIndex = -1;
+
+            while (true)
+            {
+                // get the index of the previous image
+                if (this.imageStack.Count == 0)
+                {
+                    newEntry = null;
+                }
+                else
+                {
+                    this.imageStack.Pop();
+                    if (this.imageStack.Count > 0)
+                    {
+                        newEntry = this.imageStack.First();
+                    }
+                }
+
+                // if no previous entry, break the loop
+                if (newEntry == null)
+                {
+                    break;
+                }
+
+                // try to load the thumbnail
+                try
+                {
+                    string filePath = this.GetLocalCopyOfImage(newEntry.ThumbnailPath, true);
+                    BitmapDecoder uriBitmap = BitmapDecoder.Create(new Uri(filePath), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                }
+                catch (Exception)
+                {
+                    // in case of an exception remove the entry from the list
+                    this.activeList.RemoveFile(newEntry.FilePath, true);
+                    listUpdated = true;
+
+                    // try a different image
+                    continue;
+                }
+
+                if (setImage)
+                {
+                    try
+                    {
+                        this.SetBackgroundImage(newEntry);
+                    }
+                    catch (Exception)
+                    {
+                        // in case of an exception remove the entry from the list
+                        this.activeList.RemoveFile(newEntry.FilePath, true);
+                        listUpdated = true;
+
+                        // try a different image
+                        continue;
+                    }
+                }
+
+                // if the current selection succeeded to load, end the loop
+                break;
+            }
+
+            if (listUpdated)
+            {
+                try
+                {
+                    this.activeList.SaveToFile();
+                }
+                catch (Exception)
+                {
+                    // nothing to do here
+                }
+            }
+
+            this.Cursor = System.Windows.Input.Cursors.Arrow;
+            this.inUpdatingMode = false;
+
+            if (newEntry == null)
+            {
+                c_filelist.SelectedIndex = -1;
+            }
+            else
+            {
+                c_filelist.SelectedItem = newEntry;
+            }
+        }
+
+        public void SetCurrentImageAsBackground()
+        {
+            WallpaperEntry entry = c_filelist.SelectedItem as WallpaperEntry;
+
+            try
+            {
+                this.SetBackgroundImage(entry);
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Could not set the current image as the background, please choose a different image.", e);
+            }
+        }
+
+        public void SetBackgroundImage(WallpaperEntry entry)
+        {
+            try
+            {
+                string localFile = this.GetLocalCopyOfImage(entry.FilePath, false);
+                if (localFile == null)
+                {
+                    throw new Exception("Could not get local copy of the image");
+                }
+
+                //set the new file as the desktop wallpaper
+                BackgroundSetter.SetBackgroundImage(localFile, Settings.Instance.DisplayMode, Settings.Instance.GetBackgroundColor());
+            }
+            catch (Exception e)
+            {
+                throw new Exception("Setting image did not complete fully", e);
+            }
+
+            Settings.Instance.SelectedImage = entry.FilePath;
+            this.trayIcon.SetToolText(entry.FilePath);
+        }
+
+        public void ForceExitApp()
+        {
+            this.shouldExit = true;
+            ExitOrHideApp(false);
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        private void UpdatePresentationMode(bool enable)
+        {
+            Settings.Instance.InPresentationMode = enable;
+
+            c_presentationimage.Text = Settings.Instance.PresentationImage;
+            c_disablepresentation.IsEnabled = enable;
+            c_enablepresentation.IsEnabled = !enable;
+            c_clearpresentation.IsEnabled = !enable;
+
+            c_imagenext.IsEnabled = !enable;
+            c_imageprevious.IsEnabled = !enable;
+            c_imageset.IsEnabled = !enable;
+            c_filelist.IsEnabled = !enable;
+
+            if (this.PresentationModeChanged != null)
+            {
+                this.PresentationModeChanged(null, null);
+            }
+        }
+
+        private bool ExitOrHideApp(bool isClosing)
+        {
+            bool exited = false;
+            if (this.shouldExit)
+            {
+                exited = true;
+                if (!isClosing)
+                {
+                    this.trayIcon.UpdateTrayIcon(false);
+                    this.Close();
+                }
+            }
+            else
+            {
+                exited = false;
+                this.trayIcon.UpdateTrayIcon(true);
+                this.trayIcon.UpdateMainWindow(false);
+            }
+
+            return exited;
+        }
+
+        private void UpdateFired()
+        {
+            ForceExitApp();
+        }
+
+        private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs args)
+        {
+            if (c_settings.IsVisible)
+            {
+                c_settings.ShowPanel(false);
+                args.Handled = true;
+            }
+            else if (args.Key == System.Windows.Input.Key.Escape)
+            {
+                this.ExitOrHideApp(false);
+                args.Handled = true;
+            }
+            else if (args.Key == System.Windows.Input.Key.N)
+            {
+                this.GotoNextImage(false);
+                args.Handled = true;
+            }
+            else if (args.Key == System.Windows.Input.Key.P)
+            {
+                this.GotoPreviousImage(false);
+                args.Handled = true;
+            }
+            else if (args.Key == System.Windows.Input.Key.S)
+            {
+                this.SetCurrentImageAsBackground();
+                args.Handled = true;
+            }
+        }
+
+        private void Window_StateChanged(object sender, EventArgs args)
+        {
+            if (this.WindowState == WindowState.Minimized)
+            {
+                ExitOrHideApp(false);
+            }
+        }
+
+        private void Window_Closing(object sender, CancelEventArgs args)
+        {
+            if (args != null)
+            {
+                bool exited = ExitOrHideApp(true);
+                args.Cancel = !exited;
+            }
+        }
+
+        private void Exit_Click(object sender, RoutedEventArgs args)
+        {
+            ForceExitApp();
+        }
+
+        //Settings management functions
+        private void Settings_Click(object sender, RoutedEventArgs args)
+        {
+            c_settings.ShowPanel(true);
+        }
+
+        //Filelist management functions
+        private void AddDirectory_Click(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            try
+            {
+                FolderBrowserDialog folderBrowserDialog = new FolderBrowserDialog();
+                folderBrowserDialog.ShowNewFolderButton = true;
+                folderBrowserDialog.Description = "Select the directory that you want to add.";
+
+                System.Windows.Forms.DialogResult result = folderBrowserDialog.ShowDialog();
+                if (result == System.Windows.Forms.DialogResult.OK)
+                {
+                    this.activeList.AddDirectory(folderBrowserDialog.SelectedPath);
+
+                    if (this.activeList.Count > 0)
+                        c_imagenext.IsEnabled = true;
+                    else
+                        c_imagenext.IsEnabled = false;
+                }
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Could not add the folder to the list.", e);
+            }
+            finally
+            {
+                this.activeList.SaveToFile();
+            }
+        }
+
+        private void AddFile_Click(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            try
+            {
+                OpenFileDialog fileDialog = new OpenFileDialog();
+                fileDialog.CheckFileExists = true;
+                fileDialog.CheckPathExists = true;
+                fileDialog.Multiselect = true;
+                fileDialog.Title = "Select image files";
+                fileDialog.Filter = "Image Files(*.BMP;*.JPG;*.GIF;*.PNG)|*.BMP;*.JPG;*.GIF;*.PNG";
+                fileDialog.FilterIndex = 1;
+                fileDialog.RestoreDirectory = true;
+
+                System.Windows.Forms.DialogResult result = fileDialog.ShowDialog();
+                if (result == System.Windows.Forms.DialogResult.OK)
+                {
+                    foreach (string file in fileDialog.FileNames)
+                    {
+                        this.activeList.AddFile(file);
+                    }
+
+                    if (this.activeList.Count > 0)
+                        c_imagenext.IsEnabled = true;
+                    else
+                        c_imagenext.IsEnabled = false;
+                }
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Could not add the files to the list.", e);
+            }
+            finally
+            {
+                this.activeList.SaveToFile();
+            }
+        }
+
+        private void RemoveFile_Click(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            try
+            {
+                foreach (Object item in c_filelist.SelectedItems)
+                {
+                    this.activeList.RemoveFile(item.ToString(), false);
+                }
+
+                if (this.activeList.Count > 0)
+                    c_imagenext.IsEnabled = true;
+                else
+                    c_imagenext.IsEnabled = false;
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Could not remove the file from the list.", e);
+            }
+            finally
+            {
+                this.activeList.SaveToFile();
+            }
+        }
+
+        private void RemoveAll_Click(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            try
+            {
+                this.activeList.RemoveAll();
+
+                if (this.activeList.Count > 0)
+                    c_imagenext.IsEnabled = true;
+                else
+                    c_imagenext.IsEnabled = false;
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Could not empty the list.", e);
+            }
+            finally
+            {
+                this.activeList.SaveToFile();
+            }
+        }
+
+        private void Refresh_Click(object sender, RoutedEventArgs args)
+        {
+            if (Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            try
+            {
+                if (Directory.Exists(Settings.OnlineDatabaseFolder))
+                {
+                    Directory.Delete(Settings.OnlineDatabaseFolder);
+                }
+
+                if (File.Exists(Settings.OnlineDatabaseLog))
+                {
+                    File.Delete(Settings.OnlineDatabaseLog);
+                }
+
+                if (File.Exists(Settings.OnlineDatabaseZip))
+                {
+                    File.Delete(Settings.OnlineDatabaseZip);
+                }
+
+                if (File.Exists(Settings.FileList_Online))
+                {
+                    File.Delete(Settings.FileList_Online);
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLog.Log("Could not cleanup old stuff, will try to rebuild anyway.", ex);
+            }
+
+            this.activeList = null;
+            this.UpdateFileList();
+        }
+
+        private void FileList_Selected(object sender, SelectionChangedEventArgs args)
+        {
+            if (c_filelist.SelectedItem == null)
+            {
+                c_imageset.IsEnabled = false;
+                c_previewimage.Source = null;
+                c_imageresolution.Text = string.Empty;
+                c_imageformat.Text = string.Empty;
+                c_imagefilesize.Text = string.Empty;
+
+                if (this.imageStack.Count > 1)
+                {
+                    c_imageprevious.IsEnabled = true;
+                }
+                else
+                {
+                    c_imageprevious.IsEnabled = false;
+                }
+
+                c_filelist.ScrollIntoView(c_filelist.SelectedItem);
+            }
+            else
+            {
+                c_imageset.IsEnabled = true;
+
+                try
+                {
+                    WallpaperEntry origItem = c_filelist.SelectedItem as WallpaperEntry;
+                    if (origItem != null)
+                    {
+                        string filePath = this.GetLocalCopyOfImage(origItem.ThumbnailPath, true);
+                        if (!string.IsNullOrEmpty(filePath))
+                        {
+                            BitmapDecoder uriBitmap = BitmapDecoder.Create(new Uri(filePath), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                            c_previewimage.Source = uriBitmap.Frames[0];
+                            c_imageformat.Text = uriBitmap.CodecInfo.FriendlyName;
+
+                            if (String.IsNullOrEmpty(origItem.Dimensions))
+                            {
+                                origItem.Dimensions = uriBitmap.Frames[0].PixelWidth.ToString() + "x" + uriBitmap.Frames[0].PixelHeight.ToString();
+                            }
+
+                            c_imageresolution.Text = origItem.Dimensions;
+
+                            FileInfo info = new FileInfo(filePath);
+                            c_imagefilesize.Text = info.Length.ToString() + " bytes";
+
+                            if ((this.imageStack.Count == 0) || (origItem != this.imageStack.First()))
+                            {
+                                this.imageStack.Push(origItem);
+                            }
+
+                            if (this.imageStack.Count > 1)
+                            {
+                                c_imageprevious.IsEnabled = true;
+                            }
+                            else
+                            {
+                                c_imageprevious.IsEnabled = false;
+                            }
+
+                            c_filelist.ScrollIntoView(c_filelist.SelectedItem);
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    this.GotoNextImage(false);
+                }
+            }
+        }
+
+        private void BuildOnlineFile()
+        {
+            if (File.Exists(Settings.FileList_Online))
+            {
+                return;
+            }
+
+            WallpaperList tmpList = null;
+
+            try
+            {
+                tmpList = new WallpaperList(Settings.FileList_Online, false);
+
+                string[] files = Directory.GetFiles(Settings.OnlineDatabaseFolder);
+                foreach (string file in files)
+                {
+                    using (Stream fileStream = File.Open(file, FileMode.Open))
+                    {
+                        using (StreamReader fileReader = new StreamReader(fileStream))
+                        {
+                            while (true)
+                            {
+                                string line = fileReader.ReadLine();
+                                if (line == null)
+                                {
+                                    break;
+                                }
+
+                                if (line.StartsWith("#"))
+                                {
+                                    continue;
+                                }
+
+                                string filePath = null;
+                                int firstDelimiterIndex = line.IndexOf('|');
+                                if (firstDelimiterIndex != -1)
+                                {
+                                    filePath = line.Substring(0, firstDelimiterIndex);
+                                }
+
+                                if (string.IsNullOrEmpty(filePath))
+                                {
+                                    continue;
+                                }
+
+                                string dimensions = null;
+                                int secondDelimiterIndex = line.IndexOf('^', firstDelimiterIndex);
+                                if (secondDelimiterIndex != -1)
+                                {
+                                    dimensions = line.Substring(firstDelimiterIndex + 1, secondDelimiterIndex - firstDelimiterIndex - 1);
+                                }
+
+                                string thumbnail = null;
+                                if ((secondDelimiterIndex < line.Length))
+                                {
+                                    thumbnail = line.Substring(secondDelimiterIndex + 1);
+                                }
+
+                                if (string.IsNullOrEmpty(thumbnail))
+                                {
+                                    thumbnail = filePath;
+                                }
+
+                                tmpList.AddFile(filePath, thumbnail, dimensions);
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (tmpList != null)
+                {
+                    tmpList.SaveToFile();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the path of a local copy of the file.
+        /// If the file is online, it downloads to a cache and returns path of the local copy
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <param name="isThumbnail"></param>
+        /// <returns>Path of the local copy</returns>
+        /// <exception cref="Exception">Can throw exception</exception>
+        private string GetLocalCopyOfImage(string filePath, bool isThumbnail)
+        {
+            Uri fileUri = new Uri(filePath);
+            if (fileUri.IsFile)
+            {
+                return filePath;
+            }
+
+            string dstFolder = isThumbnail ? Settings.ThumbnailCacheFolder : Settings.WallpaperCacheFolder;
+            int cacheSize = isThumbnail ? 1000 : 100;
+            string fileName = dstFolder + "\\" + Path.GetFileName(filePath);
+
+            if (File.Exists(fileName))
+            {
+                return fileName;
+            }
+
+            // cleanup cache
+            try
+            {
+                if (Directory.Exists(dstFolder))
+                {
+                    DirectoryInfo dir = new DirectoryInfo(dstFolder);
+                    foreach (FileInfo file in dir.GetFiles().OrderByDescending(x => x.LastWriteTime).Skip(cacheSize))
+                    {
+                        file.Delete();
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                //nothing to do here
+            }
+
+            try
+            {
+                if (!Directory.Exists(dstFolder))
+                {
+                    Directory.CreateDirectory(dstFolder);
+                }
+
+                using (HttpClientHandler handler = new HttpClientHandler())
+                {
+                    using (HttpClient client = new HttpClient(handler))
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(3);
+                        using (HttpResponseMessage response = client.GetAsync(filePath).Result)
+                        {
+                            if (response.IsSuccessStatusCode)
+                            {
+                                using (Stream contentStream = response.Content.ReadAsStreamAsync().Result)
+                                {
+                                    using (Stream fileStream = File.Open(fileName, FileMode.OpenOrCreate))
+                                    {
+                                        contentStream.CopyTo(fileStream);
+                                        return fileName;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                throw new Exception("Failure status code - " + response.StatusCode.ToString());
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception("Failed to download image file from " + filePath, ex);
+            }
+        }
+
+        private void FileList_CopyPath(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            if (c_filelist.SelectedItem == null)
+            {
+                return;
+            }
+
+            try
+            {
+                WallpaperEntry item = c_filelist.SelectedItem as WallpaperEntry;
+                System.Windows.Clipboard.SetText(item.FilePath);
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Copy to clipboard failed.", e);
+            }
+        }
+
+        private void FileList_OpenPath(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            if (c_filelist.SelectedItem == null)
+            {
+                return;
+            }
+
+            try
+            {
+                WallpaperEntry item = c_filelist.SelectedItem as WallpaperEntry;
+                Process.Start("explorer.exe", "/select, " + item.FilePath);
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Open folder failed.", e);
+            }
+        }
+
+        private void FileList_OpenFile(object sender, RoutedEventArgs args)
+        {
+            if (c_filelist.SelectedItem == null)
+            {
+                return;
+            }
+
+            try
+            {
+                WallpaperEntry item = c_filelist.SelectedItem as WallpaperEntry;
+                Process.Start("explorer.exe", item.FilePath);
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Log("Open file failed.", e);
+            }
+        }
+
+        private void FileList_DeleteFile(object sender, RoutedEventArgs args)
+        {
+            if (!Settings.Instance.UseLocalFiles)
+            {
+                return;
+            }
+
+            if (c_filelist.SelectedItem == null)
+            {
+                return;
+            }
+
+            try
+            {
+                WallpaperEntry item = c_filelist.SelectedItem as WallpaperEntry;
+
+                this.activeList.RemoveFile(item.FilePath, true);
+
+                if (this.activeList.Count > 0)
+                    c_imagenext.IsEnabled = true;
+                else
+                    c_imagenext.IsEnabled = false;
+            }
+            catch(Exception e)
+            {
+                ErrorLog.Log("Delete file failed.", e);
+            }
+            finally
+            {
+                this.activeList.SaveToFile();
+            }
+        }
+
+        private void ImageNext_Click(object sender, RoutedEventArgs args)
+        {
+            this.GotoNextImage(false);
+        }
+
+        private void ImagePrevious_Click(object sender, RoutedEventArgs args)
+        {
+            this.GotoPreviousImage(false);
+        }
+
+        private void ImageSet_Click(object sender, RoutedEventArgs args)
+        {
+            this.SetCurrentImageAsBackground();
+        }
+
+        /// <summary>
+        /// Switch to/from the presentation mode
+        /// </summary>
+        /// <param name="enable"></param>
+        /// <exception cref="Exception">Can throw exception</exception>
+        public void SwitchPresentationMode(bool enable, bool reset)
+        {
+            if (!reset && Settings.Instance.InPresentationMode == enable)
+            {
+                // nothing to do if it is already set appropriately
+                return;
+            }
+
+            this.UpdatePresentationMode(enable);
+
+            string imageFile = enable ? Settings.Instance.PresentationImage : Settings.Instance.SelectedImage;
+            if (string.IsNullOrEmpty(imageFile))
+            {
+                throw new Exception("No image file found");
+            }
+
+            try
+            {
+                string localFile = this.GetLocalCopyOfImage(imageFile, false);
+                if (localFile == null)
+                {
+                    throw new Exception("Could not get local copy of the image");
+                }
+
+                //set the new file as the desktop wallpaper
+                BackgroundSetter.SetBackgroundImage(localFile, Settings.Instance.DisplayMode, Settings.Instance.GetBackgroundColor());
+                this.trayIcon.SetToolText(imageFile);
+            }
+            catch (Exception e)
+            {
+                throw new Exception("Setting image did not complete fully", e);
+            }
+        }
+
+        /// <summary>
+        /// Start the auto change timer
+        /// </summary>
+        public void SetupAutoChangeTimer()
+        {
+            if (this.autoChangeTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                this.autoChangeTimer.Stop();
+
+                if (Settings.Instance.ChangeAutomatically)
+                {
+                    this.autoChangeTimer.Interval = (int)(Settings.Instance.TimeInterval * 60 * 1000);
+                    this.autoChangeTimer.Tick += new EventHandler(this.DoAutoChange);
+                    this.autoChangeTimer.Start();
+                }
+            }
+            catch (Exception e)
+            {
+                throw new Exception("Timer setup failed", e);
+            }
+        }
+
+        private void PresentationSet_Click(object sender, RoutedEventArgs args)
+        {
+            WallpaperEntry item = c_filelist.SelectedItem as WallpaperEntry;
+            if (item != null)
+            {
+                Settings.Instance.PresentationImage = item.FilePath;
+                this.SwitchPresentationMode(false, true);
+            }
+        }
+
+        private void EnablePresentation_Click(object sender, RoutedEventArgs args)
+        {
+            this.SwitchPresentationMode(true, false);
+        }
+
+        private void DisablePresentation_Click(object sender, RoutedEventArgs args)
+        {
+            this.SwitchPresentationMode(false, false);
+        }
+
+        private void ClearPresentation_Click(object sender, RoutedEventArgs args)
+        {
+            Settings.Instance.PresentationImage = string.Empty;
+            this.SwitchPresentationMode(false, true);
+        }
+
+        /// <summary>
+        /// Handler for the auto change timeout
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private void DoAutoChange(object sender, EventArgs e)
+        {
+            this.GotoNextImage(true);
+        }
+    }
+}
